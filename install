@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import io
+import shutil
+import argparse
+from distutils.spawn import find_executable
+from subprocess import check_output
+
+def find_gotp():
+  DEV_NULL=io.open("/dev/null", "w")
+
+  GOTP_PATH=""
+  try:
+    GOTP_PATH = check_output("find /lib -type f -name pam_google_authenticator.so".split(" "), stderr=DEV_NULL).decode("utf8")
+  except:
+    print("pam_google_authenticator.so not found in /lib")
+
+  try:
+    if GOTP_PATH == None or GOTP_PATH == "":
+      GOTP_PATH = check_output("find /usr/lib -type f -name pam_google_authenticator.so".split(" "), stderr=DEV_NULL).decode("utf8")
+  except:
+    print("pam_google_authenticator.so not found in /usr/lib")
+
+  DEV_NULL.close()
+
+  if GOTP_PATH == None or GOTP_PATH == "":
+    print("Please install pam_google_authenticator")
+    exit(1)
+
+  print(f"Found GOTP at: {GOTP_PATH}")
+
+LINUX_VARIANT = check_output(["uname", "-o"]).decode("utf8").split("/")[0].lower()
+SRC_DIR=os.path.dirname(os.path.realpath(__file__))
+
+PREFIX=os.environ["PREFIX"] if "PREFIX" in os.environ.keys() else "/"
+
+parser = argparse.ArgumentParser(description="Installs OTP for PAM using pam_google_authenticator")
+parser.add_argument('--secret', dest="secret", default=None, required=True, help="Secret file used for the OTP.")
+parser.add_argument('--prefix', dest="prefix", default=PREFIX, required=False, help="Prefix used for installation.")
+parser.add_argument('--control', dest="control", default="sufficient", required=False, help="Control flag.")
+parser.add_argument('PAM_CONF', default=None, metavar="PAM_CONF", help="PAM file to inject pam_otp into.")
+args = parser.parse_args()
+
+PAM_FILE=args.PAM_CONF
+SECRET_FILE=args.secret
+CONTROL=args.control
+
+# Check if GOTP is installed
+find_gotp()
+
+if args.PAM_CONF == None:
+  print(parser.print_help())
+  exit(1)
+
+if not Path(SECRET_FILE).exists():
+  print(f"WARN: The secret file '{SECRET_FILE}' does not exist. Please do not forget to generate it by running `google-authenticator`")
+
+PAM_FILE = Path(PREFIX).joinpath(args.PAM_CONF)
+
+LINE=f"auth            {CONTROL}      pam_google_authenticator.so secret={SECRET_FILE}"
+STRIP_LINE=LINE.replace(" ", "")
+
+print(f"Adding options to {PAM_FILE}...")
+pam_file=io.open(PAM_FILE, "r", encoding="utf8")
+contents = pam_file.readlines()
+pam_file.close()
+
+is_installed = len(list(filter(lambda x: x.replace(" ","").startswith(STRIP_LINE),contents))) > 0
+
+if is_installed:
+  print(f"{PAM_FILE} already uptodate")
+  pam_file.close()
+  exit(0)
+
+# Look for first "auth" entry
+first_auth = list(filter(lambda x: x.startswith("auth ") or x.startswith("auth\t"), contents))
+first_auth_index = 0
+
+if len(first_auth) < 1:
+  print(f"'{PAM_FILE}' does not have an 'auth' entry, injecting at top.")
+  first_auth_index = 1
+else:
+  first_auth_index = contents.index(first_auth[0])
+
+
+# If no auth lines are present, inject at the top
+
+contents.insert(first_auth_index, f"{LINE}\n")
+
+# backup
+print(f"Backing up {PAM_FILE} to {PAM_FILE}.old")
+shutil.copy2(PAM_FILE, f"{PAM_FILE}.old")
+
+print("Writing PAM config...")
+pam_file=io.open(PAM_FILE, "w", encoding="utf8")
+pam_file.truncate()
+pam_file.writelines(contents)
+pam_file.flush()
+pam_file.close()
+print("Done")
